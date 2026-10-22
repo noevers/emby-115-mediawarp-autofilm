@@ -1,0 +1,357 @@
+package handler
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/AkimioJR/MediaWarp/constants"
+	"github.com/AkimioJR/MediaWarp/internal/config"
+	"github.com/AkimioJR/MediaWarp/internal/logging"
+	"github.com/AkimioJR/MediaWarp/internal/service/emby"
+	"github.com/AkimioJR/MediaWarp/utils"
+
+	"github.com/gin-gonic/gin"
+)
+
+// // 带引用计数的互斥锁
+// type mutexWithRefCount struct {
+// 	mu       sync.Mutex
+// 	refCount int32 // 使用 atomic 操作
+// }
+
+// Emby服务器处理器
+type EmbyHandler struct {
+	client          *emby.Client           // Emby客户端
+	routerRules     []RegexpRouteRule      // 正则路由规则
+	proxy           *httputil.ReverseProxy // 反向代理
+	httpStrmHandler StrmHandlerFunc
+	// playbackInfoMutex sync.Map // 视频流处理并发控制，确保同一个 item ID 的重定向请求串行化，避免重复获取缓存
+}
+
+// 初始化
+func NewEmbyServerHandler(addr string, apiKey string) (*EmbyHandler, error) {
+	var handler = EmbyHandler{}
+	client, err := emby.New(addr, apiKey)
+	if err != nil {
+		return nil, fmt.Errorf("创建 Emby 客户端实例失败: %w", err)
+	}
+	handler.client = client
+	target, err := url.Parse(handler.client.GetBaseURLString())
+	if err != nil {
+		return nil, err
+	}
+	handler.proxy = newSingleHostRewriteProxy(target)
+
+	{ // 初始化路由规则
+		handler.routerRules = []RegexpRouteRule{
+			{
+				Regexp:  constants.EmbyRegexp.Router.VideosHandler,
+				Handler: handler.VideosHandler,
+			},
+			{
+				Regexp: constants.EmbyRegexp.Router.ModifyPlaybackInfo,
+				Handler: responseModifyCreater(
+					handler.proxy.Rewrite,
+					handler.ModifyPlaybackInfo,
+				),
+			},
+			{
+				Regexp: constants.EmbyRegexp.Router.ModifyBaseHtmlPlayer,
+				Handler: responseModifyCreater(
+					handler.proxy.Rewrite,
+					handler.ModifyBaseHtmlPlayer,
+				),
+			},
+		}
+
+		if config.Web.Enable {
+			if config.Web.Index || config.Web.Head != "" || config.Web.ExternalPlayerUrl || config.Web.VideoTogether {
+				handler.routerRules = append(handler.routerRules,
+					RegexpRouteRule{
+						Regexp: constants.EmbyRegexp.Router.ModifyIndex,
+						Handler: responseModifyCreater(
+							handler.proxy.Rewrite,
+							generateWebModifier(constants.EMBY),
+						),
+					},
+				)
+			}
+		}
+		if config.Subtitle.Enable && config.Subtitle.SRT2ASS {
+			handler.routerRules = append(handler.routerRules,
+				RegexpRouteRule{
+					Regexp: constants.EmbyRegexp.Router.ModifySubtitles,
+					Handler: responseModifyCreater(
+						handler.proxy.Rewrite,
+						handler.ModifySubtitles,
+					),
+				},
+			)
+		}
+	}
+	handler.httpStrmHandler, err = getHTTPStrmHandler()
+	if err != nil {
+		return nil, fmt.Errorf("创建 HTTPStrm 处理器失败: %w", err)
+	}
+	return &handler, nil
+}
+
+// 转发请求至上游服务器
+func (handler *EmbyHandler) ReverseProxy(rw http.ResponseWriter, req *http.Request) {
+	handler.proxy.ServeHTTP(rw, req)
+}
+
+// 正则路由表
+func (handler *EmbyHandler) GetRegexpRouteRules() []RegexpRouteRule {
+	return handler.routerRules
+}
+
+func (handler *EmbyHandler) GetImageCacheRegexp() *regexp.Regexp {
+	return constants.EmbyRegexp.Cache.Image
+}
+
+func (handler *EmbyHandler) GetSubtitleCacheRegexp() *regexp.Regexp {
+	return constants.EmbyRegexp.Cache.Subtitle
+}
+
+// 修改播放信息请求
+//
+// /Items/:itemId/PlaybackInfo
+// 强制将 HTTPStrm 设置为支持直链播放和转码、AlistStrm 设置为支持直链播放并且禁止转码
+func (handler *EmbyHandler) ModifyPlaybackInfo(rw *http.Response) error {
+	startTime := time.Now()
+	defer func() {
+		logging.Debugf("处理 ModifyPlaybackInfo 耗时：%s", time.Since(startTime))
+	}()
+
+	defer rw.Body.Close()
+	body, err := io.ReadAll(rw.Body)
+	if err != nil {
+		logging.Warning("读取 Body 出错：", err)
+		return err
+	}
+
+	jsonChain := utils.NewJsonChainFromBytesWithCopy(body, jsonChainOption)
+
+	var playbackInfoResponse emby.PlaybackInfoResponse
+	if err = json.Unmarshal(body, &playbackInfoResponse); err != nil {
+		logging.Warning("解析 emby.PlaybackInfoResponse Json 错误：", err)
+		return err
+	}
+
+	for index, mediasource := range playbackInfoResponse.MediaSources {
+		startTime := time.Now()
+
+		if mediasource.ID == nil {
+			logging.Debug("跳过缺少 Id 的 MediaSource")
+			continue
+		}
+
+		// Live TV / opened live streams are not library STRM items. They can omit ItemId
+		// and use a transient MediaSource Id, so pass them through unchanged.
+		if mediasource.IsInfiniteStream != nil && *mediasource.IsInfiniteStream {
+			logging.Debug("跳过直播 MediaSource：" + *mediasource.ID)
+			continue
+		}
+		if mediasource.RequiresOpening != nil && *mediasource.RequiresOpening {
+			logging.Debug("跳过需要打开直播流的 MediaSource：" + *mediasource.ID)
+			continue
+		}
+		if mediasource.ItemID == nil {
+			logging.Debug("跳过缺少 ItemId 的 MediaSource：" + *mediasource.ID)
+			continue
+		}
+
+		logging.Debug("请求 ItemsServiceQueryItem：" + *mediasource.ItemID)
+		itemResponse, err := handler.client.ItemsServiceQueryItem(*mediasource.ItemID, 1, "Path,MediaSources")
+		if err != nil {
+			logging.Warning("请求 ItemsServiceQueryItem 失败：", err)
+			continue
+		}
+		if itemResponse == nil || len(itemResponse.Items) == 0 {
+			logging.Warning("请求 ItemsServiceQueryItem 未返回 Item：", *mediasource.ItemID)
+			continue
+		}
+
+		bsePath := "MediaSources." + strconv.Itoa(index) + "."
+		item := itemResponse.Items[0]
+		if item.Path == nil {
+			logging.Debug("跳过缺少 Path 的 Item：" + *mediasource.ItemID)
+			continue
+		}
+
+		strmFileType, opt := recgonizeStrmFileType(*item.Path)
+		switch strmFileType {
+		case constants.HTTPStrm: // HTTPStrm 设置支持直链播放并且禁止转码
+			processHTTPStrmPlaybackInfo(
+				jsonChain,
+				bsePath,
+				*mediasource.ItemID,
+				*mediasource.ID,
+				mediasource.DirectStreamURL,
+			)
+
+		case constants.AlistStrm: // AlistStm 设置支持直链播放并且禁止转码
+			processAlistStrmPlaybackInfo(
+				jsonChain,
+				bsePath,
+				*mediasource.ItemID,
+				*mediasource.ID,
+				opt.(string),
+				mediasource.DirectStreamURL,
+				*item.Path,
+				mediasource.Size,
+			)
+		}
+
+		logging.Debugf("处理 %s 的 MediaSource %s 耗时：%s", *item.Path, *mediasource.ID, time.Since(startTime))
+	}
+
+	body, err = jsonChain.Result()
+	if err != nil {
+		logging.Warning("操作 emby.PlaybackInfoResponse Json 错误：", err)
+		return err
+	}
+
+	rw.Header.Set("Content-Type", "application/json")        // 更新 Content-Type 头
+	rw.Header.Set("Content-Length", strconv.Itoa(len(body))) // 更新 Content-Length 头
+	rw.Body = io.NopCloser(bytes.NewReader(body))
+	return nil
+}
+
+// 视频流处理器
+//
+// 支持播放本地视频、重定向 HttpStrm、AlistStrm
+func (handler *EmbyHandler) VideosHandler(ctx *gin.Context) {
+	if ctx.Request.Method == http.MethodHead { // 不额外处理 HEAD 请求
+		handler.ReverseProxy(ctx.Writer, ctx.Request)
+		logging.Debug("VideosHandler 不处理 HEAD 请求，转发至上游服务器")
+		return
+	}
+
+	orginalPath := ctx.Request.URL.Path
+	matches := constants.EmbyRegexp.Others.VideoRedirectReg.FindStringSubmatch(orginalPath)
+	if len(matches) == 2 {
+		redirectPath := fmt.Sprintf("/videos/%s/stream", matches[0])
+		logging.Debugf("%s 重定向至：%s", orginalPath, redirectPath)
+		ctx.Redirect(http.StatusFound, redirectPath)
+		return
+	}
+
+	// EmbyServer <= 4.8 ====> mediaSourceID = 343121
+	// EmbyServer >= 4.9 ====> mediaSourceID = mediasource_31
+	mediaSourceID := ctx.Query("mediasourceid")
+
+	logging.Debugf("请求 ItemsServiceQueryItem：%s", mediaSourceID)
+	mediaSourceID_without_prefix := strings.Replace(mediaSourceID, "mediasource_", "", 1)
+	itemResponse, err := handler.client.ItemsServiceQueryItem(mediaSourceID_without_prefix, 1, "Path,MediaSources") // 查询 item 需要去除前缀仅保留数字部分
+	if err != nil {
+		logging.Warning("请求 ItemsServiceQueryItem 失败：", err)
+		handler.ReverseProxy(ctx.Writer, ctx.Request)
+		return
+	}
+
+	if len(itemResponse.Items) == 0 {
+		logging.Warningf("ItemsServiceQueryItem 返回空结果，mediaSourceID: %s", mediaSourceID)
+		handler.ReverseProxy(ctx.Writer, ctx.Request)
+		return
+	}
+
+	item := itemResponse.Items[0]
+
+	if item.Path == nil || !strings.HasSuffix(strings.ToLower(*item.Path), ".strm") { // 不是 Strm 文件
+		logging.Debug("播放本地视频，不进行处理")
+		handler.ReverseProxy(ctx.Writer, ctx.Request)
+		return
+	}
+
+	strmFileType, opt := recgonizeStrmFileType(*item.Path)
+
+	for _, mediasource := range item.MediaSources {
+		if mediasource.ID == nil {
+			logging.Debugf("跳过 ID 为空的 MediaSource, mediaSourceID: %s", mediaSourceID)
+			continue
+		}
+		logging.Debugf("mediasource.ID: %s ; mediaSourceID: %s ; mediaSourceID_without_prefix: %s", *mediasource.ID, mediaSourceID, mediaSourceID_without_prefix)
+		// EmbyServer >= 4.9 返回的ID带有前缀mediasource_
+		if strings.Replace(*mediasource.ID, "mediasource_", "", 1) == mediaSourceID_without_prefix {
+			if mediasource.Path == nil {
+				logging.Warningf("MediaSource (ID: %s) 的 Path 为空", *mediasource.ID)
+				handler.ReverseProxy(ctx.Writer, ctx.Request)
+				return
+			}
+			switch strmFileType {
+			case constants.HTTPStrm:
+				if mediasource.Protocol != nil && *mediasource.Protocol == emby.HTTP {
+					ctx.Redirect(http.StatusFound, handler.httpStrmHandler(*mediasource.Path, ctx.Request.UserAgent()))
+					return
+				}
+
+			case constants.AlistStrm: // 无需判断 *mediasource.Container 是否以Strm结尾，当 AlistStrm 存储的位置有对应的文件时，*mediasource.Container 会被设置为文件后缀
+				res, err := alistStrmHandler(*mediasource.Path, opt.(string), ctx.Request.UserAgent(), false)
+				if err != nil {
+					logging.Warningf("获取 AlistStrm 重定向 URL 失败: %#v", err)
+					handler.ReverseProxy(ctx.Writer, ctx.Request)
+					return
+				}
+				ctx.Redirect(http.StatusFound, res.url)
+				return
+
+			case constants.UnknownStrm:
+				handler.ReverseProxy(ctx.Writer, ctx.Request)
+				return
+			}
+		}
+	}
+}
+
+// 修改字幕
+//
+// 将 SRT 字幕转 ASS
+func (handler *EmbyHandler) ModifySubtitles(rw *http.Response) error {
+	defer rw.Body.Close()
+	subtitile, err := io.ReadAll(rw.Body) // 读取字幕文件
+	if err != nil {
+		logging.Warning("读取原始字幕 Body 出错：", err)
+		return err
+	}
+
+	if utils.IsSRT(subtitile) { // 判断是否为 SRT 格式
+		logging.Info("字幕文件为 SRT 格式")
+		if config.Subtitle.SRT2ASS {
+			logging.Info("已将 SRT 字幕已转为 ASS 格式")
+			assSubtitle := utils.SRT2ASS(subtitile, config.Subtitle.ASSStyle)
+			rw.Header.Set("Content-Length", strconv.Itoa(len(assSubtitle)))
+			rw.Body = io.NopCloser(bytes.NewReader(assSubtitle))
+			return nil
+		}
+	}
+	return nil
+}
+
+// 修改 basehtmlplayer.js
+//
+// 用于修改播放器 JS，实现跨域播放 Strm 文件（302 重定向）
+func (handler *EmbyHandler) ModifyBaseHtmlPlayer(rw *http.Response) error {
+	defer rw.Body.Close()
+	body, err := io.ReadAll(rw.Body)
+	if err != nil {
+		return err
+	}
+
+	body = bytes.ReplaceAll(body, []byte(`mediaSource.IsRemote&&"DirectPlay"===playMethod?null:"anonymous"`), []byte("null")) // 修改响应体
+	rw.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	rw.Body = io.NopCloser(bytes.NewReader(body))
+	return nil
+}
+
+var _ MediaServerHandler = (*EmbyHandler)(nil) // 确保 EmbyHandler 实现 MediaServerHandler 接口

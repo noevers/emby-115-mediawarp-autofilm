@@ -1,0 +1,11 @@
+services:
+  autofilm:
+    image: akimio/autofilm:latest
+    container_name: autofilm
+    restart: unless-stopped # 推荐加上：容器异常退出时自动重启
+    volumes:
+      - ./config:/config # 配置文件目录，该目录下需要一个 config.yaml 文件
+      - ./logs:/logs # 日志目录，容器运行时会在该目录下生成日志文件
+      - ./fonts:/fonts # 字体目录，library_poster_tasks 需要使用，若不启用该任务则无需配置（也可以直接将字体文件放到`/config`目录下，根据配置文件自由选择）
+      - ./media:/media # 输出目录，不一定需要映射`/media`，根据配置文件自行选择
+

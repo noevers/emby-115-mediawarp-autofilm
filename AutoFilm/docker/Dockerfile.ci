@@ -1,0 +1,14 @@
+FROM alpine
+
+ARG TARGETPLATFORM
+
+ENV TZ=Asia/Shanghai
+
+RUN apk add --no-cache ca-certificates tzdata
+
+COPY --chmod=755 targets/${TARGETPLATFORM}/autofilm /autofilm
+
+VOLUME ["/config", "/logs", "/media", "/fonts"]
+WORKDIR /
+
+ENTRYPOINT ["./autofilm"]

@@ -1,0 +1,200 @@
+package handler
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"regexp"
+	"strconv"
+	"time"
+
+	"github.com/AkimioJR/MediaWarp/constants"
+	"github.com/AkimioJR/MediaWarp/internal/config"
+	"github.com/AkimioJR/MediaWarp/internal/logging"
+	"github.com/AkimioJR/MediaWarp/utils"
+
+	"github.com/tidwall/gjson"
+)
+
+type FNTVHandler struct {
+	routerRules     []RegexpRouteRule      // 正则路由规则
+	proxy           *httputil.ReverseProxy // 反向代理
+	httpStrmHandler StrmHandlerFunc
+}
+
+func NewFNTVHandler(addr string) (*FNTVHandler, error) {
+	handler := FNTVHandler{}
+	target, err := url.Parse(addr)
+	if err != nil {
+		return nil, err
+	}
+	handler.proxy = newSingleHostRewriteProxy(target)
+
+	handler.routerRules = []RegexpRouteRule{
+		{
+			Regexp: constants.FNTVRegexp.StreamHandler,
+			Handler: responseModifyCreater(
+				handler.proxy.Rewrite,
+				handler.ModifyStream,
+			),
+		},
+	}
+
+	if config.Web.Enable {
+		if config.Web.Index || config.Web.Danmaku || config.Web.Head != "" {
+			handler.routerRules = append(
+				handler.routerRules,
+				RegexpRouteRule{
+					Regexp: constants.FNTVRegexp.ModifyIndex,
+					Handler: responseModifyCreater(
+						handler.proxy.Rewrite,
+						generateWebModifier(constants.FNTV),
+					),
+				},
+			)
+		}
+	}
+
+	handler.httpStrmHandler, err = getHTTPStrmHandler()
+	if err != nil {
+		return nil, fmt.Errorf("创建 HTTPStrm 处理器失败: %w", err)
+	}
+
+	return &handler, nil
+}
+
+// 转发请求至上游服务器
+func (handler *FNTVHandler) ReverseProxy(writer http.ResponseWriter, request *http.Request) {
+	handler.proxy.ServeHTTP(writer, request)
+}
+
+// 获取正则路由表
+func (handler *FNTVHandler) GetRegexpRouteRules() []RegexpRouteRule {
+	return handler.routerRules
+}
+
+// 获取图片缓存正则表达式
+func (handler *FNTVHandler) GetImageCacheRegexp() *regexp.Regexp {
+	return constants.FNTVRegexp.Cache.Image
+}
+
+// 获取字幕缓存正则表达式
+func (*FNTVHandler) GetSubtitleCacheRegexp() *regexp.Regexp {
+	return constants.FNTVRegexp.Cache.Subtitle
+}
+
+func (handler *FNTVHandler) ModifyStream(rw *http.Response) error {
+	startTime := time.Now()
+	defer func() {
+		logging.Debugf("FNTV ModifyStream 处理耗时: %s", time.Since(startTime).String())
+	}()
+
+	data, err := io.ReadAll(rw.Body)
+	if err != nil {
+		logging.Warning("读取响应体失败：", err)
+		return err
+	}
+	defer rw.Body.Close()
+
+	jsonChain := utils.NewJsonChainFromBytesWithCopy(data, jsonChainOption)
+
+	codeRes := jsonChain.Get("code")
+	if codeRes.Type != gjson.Number {
+		logging.Warningf("stream 响应 code 类型错误: %v", codeRes)
+		rw.Body = io.NopCloser(bytes.NewReader(data))
+		return nil
+	} else if code := codeRes.Int(); code != 0 {
+		logging.Debugf("stream 响应 code: %d, msg: %s", code, jsonChain.Get("msg").String())
+		rw.Body = io.NopCloser(bytes.NewReader(data))
+		return nil
+	}
+
+	filePathRes := jsonChain.Get("data.file_stream.path")
+	if filePathRes.Type != gjson.String {
+		logging.Warningf("stream 响应 data.file_stream.path 字段不正确: %#v", filePathRes)
+		rw.Body = io.NopCloser(bytes.NewReader(data))
+		return nil
+	}
+
+	filePath := filePathRes.String()
+
+	strmFileType, opt := recgonizeStrmFileType(filePath)
+
+	switch strmFileType {
+	case constants.HTTPStrm: // HTTPStrm 设置支持直链播放并且支持转码
+		urlRes := jsonChain.Get("data.direct_link_qualities.0.url")
+		if urlRes.Type != gjson.String {
+			logging.Warningf("stream 响应 data.direct_link_qualities.0.url 字段不正确: %#v", urlRes)
+			rw.Body = io.NopCloser(bytes.NewReader(data))
+			return nil
+		}
+
+		redirectURL := handler.httpStrmHandler(urlRes.String(), rw.Request.Header.Get("User-Agent"))
+		jsonChain.Set(
+			"data.direct_link_qualities.0.resolution",
+			"HTTPStrm 直链",
+		).Set(
+			"data.direct_link_qualities.0.url",
+			redirectURL,
+		)
+
+	case constants.AlistStrm: // AlistStm 设置支持直链播放并且禁止转码
+		remoteFilepathRes := jsonChain.Get("data.direct_link_qualities.0.url")
+		if remoteFilepathRes.Type != gjson.String {
+			logging.Warningf("stream 响应 data.direct_link_qualities.0.url 字段不正确: %#v", remoteFilepathRes)
+			rw.Body = io.NopCloser(bytes.NewReader(data))
+			return nil
+		}
+
+		ua := ""; if rw.Request != nil { ua = rw.Request.UserAgent() }
+		res, err := alistStrmHandler(remoteFilepathRes.String(), opt.(string), ua, true)
+		if err != nil {
+			logging.Warningf("获取 AlistStrm 重定向 URL 失败: %#v", err)
+			rw.Body = io.NopCloser(bytes.NewReader(data))
+			return nil
+		}
+		jsonChain.Set(
+			"data.direct_link_qualities.0.resolution",
+			"AlistStrm 直链 - 原画",
+		).Set(
+			"data.direct_link_qualities.0.url",
+			res.url,
+		).Set("data.file_stream.size", res.fileSize)
+
+		for i, resource := range res.transcodeResources {
+			basePath := "data.direct_link_qualities." + strconv.Itoa(i+1) + "."
+			jsonChain.Set(
+				basePath+"resolution",
+				"AlistStrm 直链 - 转码 "+resource.resolution.name,
+			).Set(
+				basePath+"url",
+				resource.url,
+			).Set(
+				basePath+"is_m3u8",
+				resource.isM3U8,
+			).Set(
+				basePath+"expire_at",
+				int64(time.Since(resource.expireAt).Seconds()),
+			)
+		}
+
+	default:
+		logging.Debugf("%s 未匹配任何 Strm 类型，保持原有播放链接不变", filePath)
+	}
+
+	data, err = jsonChain.Result()
+	if err != nil {
+		logging.Warningf("操作 FNTV Stream Json 错误: %v", err)
+		return err
+	}
+	rw.Header.Set("Content-Type", "application/json") // 更新 Content-Type 头
+	rw.Header.Set("Content-Length", strconv.Itoa(len(data)))
+	rw.Body = io.NopCloser(bytes.NewReader(data))
+
+	return nil
+}
+
+var _ MediaServerHandler = (*FNTVHandler)(nil)

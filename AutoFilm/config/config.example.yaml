@@ -1,0 +1,141 @@
+alist:                                      # AList 服务器列表（兼容 OpenList），支持多个服务器配置；每个服务器配置一个独立的 ID，供后续任务引用
+  - id: 我的Alist                            # 标识 ID，用于关联 AList 客户端对象
+    base_url: http://alist:5244             # AList 服务器地址；未写协议时会默认补 https://
+    public_url: https://alist.example.com   # 公共访问地址，用于 AlistURL 模式生成 .strm 内容（可选）
+    username: admin                         # AList 用户名（使用 token 时可留空）
+    password: adminadmin                    # AList 密码（使用 token 时可留空）
+    otp_code:                               # AList 两步验证验证码（可选）
+    token:                                  # AList 永久令牌（可选；填写后无需 username/password）
+    wait_time: 0                            # AList API 请求最小间隔时间，单位秒；0 表示不限速
+
+  - id: OpenList                            # 标识 ID，用于关联 AList 客户端对象
+    base_url: http://openlist.com:443       # 兼容 OpenList
+    public_url: 
+    username: admin
+    password: adminadmin
+    otp_code:
+    token:
+    wait_time: 0
+
+  - id: 使用Token认证的Alist
+    base_url: http://alist.com:5244
+    public_url:
+    username:
+    password:
+    otp_code:
+    token: alist-your-static-token
+    wait_time: 0.2
+
+media_servers:
+  - id: 我的Jellyfin                     # 标识 ID，用于 LibraryPoster 任务引用
+    kind: jellyfin                      # 服务器类型：jellyfin 或 emby
+    base_url: http://jellyfin:8096      # 媒体服务器地址
+    api_key: your-api-key               # Jellyfin/Emby API Key
+    user_id:                            # 查询媒体项使用的用户 ID；留空时自动使用首个用户
+    timeout: 30                         # HTTP 请求超时时间，单位秒
+
+
+alist2strm_tasks:
+  - id: 动漫                                 # 标识 ID，用于日志和 .strm 智能保护状态文件
+    cron: 0 0 20 * * *                      # 后台定时任务 Cron 表达式；格式为`<秒> <分> <时> <日> <月> <星期>`
+    alist: 我的Alist                         # 关联上面定义的 AList 客户端 ID（可以多个任务关联同一个 AList 客户端实现复用）
+    source_dir: /ani                        # AList 服务器上需要扫描的目录
+    target_dir: /media/ani                  # 本地 .strm 和伴生文件输出目录
+    mode: AlistURL                          # .strm 内容模式：AlistURL、RawURL、AlistPath
+    flatten_mode: false                     # 平铺模式；开启后所有 .strm 输出到同一级目录，且不会下载伴生文件
+    overwrite: false                        # 覆盖模式；本地已存在同名文件时是否重新生成/下载
+    concurrency: 50                         # 执行任务的最大并发处理数，可以减轻运行设备与 AList 服务器负载
+    download:                               # 下载相关配置
+      enable: false                         # 是否下载字幕、图片、NFO 和自定义后缀等伴生文件
+      subtitle: false                       # 是否下载字幕文件：.ass、.srt、.ssa、.sub
+      image: false                          # 是否下载图片文件：.png、.jpg
+      nfo: false                            # 是否下载 .nfo 文件
+      other_ext: []                         # 自定义下载后缀列表，例如 [".zip", ".md"]
+      concurrency: 5                        # 最大同时下载伴生文件数量
+    sync:                                   # 同步远程相关配置
+      enabled: true                         # 是否同步服务器删除；开启后远端不存在的本地文件会被删除
+      ignore: "\\.(nfo|jpg)$"               # 同步删除时忽略的文件名正则；仅匹配文件名，不匹配完整路径
+      smart_protection:                     # .strm 智能保护，仅在 sync.enabled 为 true 时生效
+        enabled: true                       # 是否启用保护（默认 false）
+        threshold: 100                      # 触发保护的待删除 .strm 数量阈值
+        grace_scans: 3                      # 达到阈值后，连续确认多少次才真正删除
+
+  - id: 电影
+    cron: 0 0 20 * * *
+    alist: 使用Token认证的Alist
+    source_dir: /movies
+    target_dir: /media/movies
+    mode: RawURL
+    flatten_mode: false
+    overwrite: false
+    concurrency: 20
+    download:
+      enable: true
+      subtitle: true
+      image: true
+      nfo: true
+      other_ext:
+        - .zip
+        - .md
+      concurrency: 5
+    sync:
+      enabled: true
+      ignore:
+      smart_protection:
+        enabled: false
+
+ani2alist_tasks:
+  - id: 新番追更                                      # 标识 ID，用于日志和调度识别
+    cron: 0 20 12 * * *                              # 后台定时任务 Cron 表达式
+    alist: OpenList                                  # 关联上面定义的 AList 客户端 ID（需要管理员权限）
+    target_dir: /Anime                               # UrlTree 存储器挂载路径，不存在时会自动创建
+    source:                                          # 数据源配置
+      source_url: https://aniopen.an-i.workers.dev   # ANI Open 目录数据源完整 URL
+      rss_url: https://api.ani.rip/ani-download.xml  # ANI RSS 完整 URL
+    update:                                          # 更新模式（有 rss、latest、keyword 3 种模式）
+      mode: rss                                      # RSS 追更模式，读取 rss_url 中的最新条目
+
+  - id: 最新季度
+    cron: 0 10 7 * * *
+    alist: OpenList
+    target_dir: /Anime
+    source:
+      source_url: https://aniopen.an-i.workers.dev
+      rss_url: https://api.ani.rip/ani-download.xml
+    update:
+      mode: latest                                   # 当前季度模式，运行时自动计算 source_url/{year}-{month}/
+      template: "{{ year }}年/{{ month }}月"          # 写入 UrlTree 的子目录模板；留空则直接写入 target_dir
+
+  - id: 自定义关键字
+    cron: 0 30 7 * * *
+    alist: 我的Alist
+    target_dir: /Anime
+    source:
+      source_url: https://aniopen.an-i.workers.dev
+      rss_url: https://api.ani.rip/ani-download.xml
+    update:
+      mode: keyword                                   # 关键字模式，递归解析 source_url/{keyword}/
+      keyword: "2026-4"
+
+library_poster_tasks:
+  - id: 媒体库海报
+    cron: 0 50 13 * * *                     # 后台定时任务 Cron 表达式
+    server: 我的Jellyfin                     # 关联 media_servers 中定义的服务器 ID
+    upload: false                           # 是否覆盖服务器上的媒体库 Primary 图片
+    output_dir: /media/posters              # 本地预览输出目录；与 upload 至少启用一个
+    title_font: /fonts/ch.ttf               # 主标题字体路径
+    subtitle_font: /fonts/en.otf            # 副标题字体路径
+    render:
+      style: collage                        # 风格可选：card、split、collage、blur
+      resolution: 1080p                     # 预设分辨率：480p、720p、1080p；或者是自定义分辨率：{width: 1600, height: 900}
+      blur_radius: 50                       # 模糊半径，以 1080p 为基准自动缩放
+      color_strength: 0.8                   # 主题色叠加强度，范围 0.0～1.0
+    libraries:                              # 只处理这里明确列出的媒体库
+      - name: 动漫                           # Jellyfin/Emby 中的媒体库名称
+        title: 动漫                          # 海报主标题；留空时使用媒体库名称
+        subtitle: ANIME                     # 海报副标题
+        sort: date_last_content_added       # 可选排序方式：random、date_created、date_last_content_added
+      - name: 电影
+        title: 电影
+        subtitle: MOVIE
+        sort: random

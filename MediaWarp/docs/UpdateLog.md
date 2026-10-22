@@ -1,0 +1,153 @@
+# 版本更新日志
+- 2024.8.21: v0.0.1
+  - 实现 MediaWarp 基本功能
+- 2024.8.25: v0.0.2
+  - 增加返回自定义静态资源功能
+  - 优化播放直链视频 302 重定向逻辑
+  - 增加自定义客户端过滤功能
+- 2024.9.14: v0.0.3
+  - 实现 AlistStrm 重定向
+  - 适配 EmbyServer 4.9 视频播放逻辑
+  - 嵌入实用功能（外部播放器、弹幕、美化等）
+  - 支持WebSocket
+- 2024.9.29: v0.0.4
+  - 优化 mediaSourceID 处理逻辑
+  - 使用 httputil.ReverseProxy 处理 HTTP 和 WebSocket 请求
+  - 设置浏览器referer策略，跳转时减少服务器站点泄露
+  - 使用正则表达式进行路由匹配
+  - 定义缓存接口、实现内存缓存逻辑
+  - 修改项目结构
+  - 用户自定义资源设为 Custom、从 config 中读取需要额外添加的 HEAD
+  - 日志允许设置是否输出到终端或文件
+  - 日志根据日期分割
+- 2024.11.1: v0.0.5
+  - 扩大 VideosHandler 匹配范围（修复 FileBall 下 Strm 文件播放问题，不完美）
+  - 中间件缓存可选是否开启（避免内存缓存缓存大量图片、css、js 等资源）
+  - 修改 internal/config、internal/logger、internal/cache 这几个包，使其使用方式更加 “golang”
+  - 支持加载多种格式的配置文件（JSON、TOML、YAML、YML、Java properties、Java props）
+- 2024.12.22: v0.0.6
+  - 提供 API 接口查看版本具体信息
+  - 小幅度修改项目子包结构
+  - 使用 goreleaser 进行构建
+  - 减小 EmbyServer.VideosHandler 匹配范围
+  - 需要修改响应体时复用之前实例化的 httputil.ReverseProxy
+  - EmbyServerHandler.PlaybackInfoHandler 拦截修改响应修改 AlistStrm 正确播放地址
+- 2025.2.20: v0.0.7
+  - 提供字幕接口相关正则，新增 SRT 字幕转 ASS 字幕功能
+  - 修复当 MediaStreams 为空数组的情况移除该字段导致导致部分客户端报错问题
+  - 优化 VideosHandler 函数中优先判断是否为 HEAD 请求
+  - 优化 ModifyPlaybackInfo 函数，减少无意义请求数，降低响应延迟
+  - 新增转码设置选项以支持 HTTPStrm 和 AlistStrm  是否返回 PlaybackInfo 通告客户端禁止转码
+  - f新增 RawURL 配置选项以控制 AlistStrm 的重定向链接
+- 2025.3.22: v0.0.8
+  - 优化 AlistStrm 重定向连接
+  - 重构 EmbyRegexp 结构，优化正则表达式管理 
+  - 优化 EmbyServerHandler.ModifySubtitles 和 EmbyServerHandler.ModifyBaseHtmlPlayer 性能
+  - 优化 SRT2ASS 性能
+  - 修改正则路由处理，使用不带查询参数的 URL 路径（Path）进行路由匹配
+  - 添加版本信息标志，支持显示当前版本信息
+- 2025.3.26: v0.0.9
+  -  调整静态资源、自定义目录
+  -  使用 git 子模块的方式引入 js、css 等文件，移除 emby css 美化功能
+  -  移除内存缓存相关设计，以避免内存泄漏
+  -  修复 ModifyPlaybackInfo 和 ModifySubtitles 函数中的响应体关闭顺序，确保正确读取 HTTP 响应
+  -  优化 EmbyServerHandler.responseModifyCreater 闭包逻辑
+  -  使用 switch 语句重构客户端过滤器逻辑，移除未知模式处理
+  -  使用 gin.Recovery() 捕获 panic，避免 MediaWarp 出现意外错误后软件崩溃
+  -  优化程序启动逻辑，改进错误处理
+  -  解析构建时间格式，改进构建日期处理逻辑
+  -  更新 go-lang 版本及第三方依赖
+- 2025.3.27: v0.0.10
+  -  主函数添加信号处理和错误处理机制，优化服务退出流程
+  -  修复配置初始化失败时错误调用日志输出，改为使用标准输出
+  -  将 responseModifyCreater、recgonizeStrmFileType、updateBody 函数移至 utils.go 并独立与 EmbyServerHandler，便于后续复用
+  -  修复日志中间件颜色控制输出错误问题
+  -  将反向代理逻辑从 emby.EmbyServer 移至 handler.EmbyServerHandler
+  -  重构媒体服务器处理器初始化逻辑，改为返回错误以便更好地处理初始化失败情况
+  -  添加 GZIP、Brotli 解压支持并重构读取响应体的逻辑
+  -  在正则路由处理器中添加调试日志以记录匹配成功的 URL
+  -  在恢复中间件中添加详细的错误日志记录以处理 panic 错误
+  -  支持通过命令行参数指定配置文件路径
+- 2025.3.29: v0.1.0
+  - 添加 Jellyfin 支持
+  - 添加 crx 美化功能（支持 Emby 和 Jellyfin）
+  - 调整某些常量命名，更符合 go-lang 命名
+- 2025.6.2: v0.1.1
+  - 更新上游依赖
+  - 提高对 EmbyServer beta 版本的兼容性
+  - HTTPStrm 添加获取最终 URL 获取功能，减少客户端重定向次数
+  - 提高对 Afusekt 客户端的兼容性 [#37](https://github.com/AkimioJR/MediaWarp/issues/37)
+  - 优化 responseModifyCreater 函数，可以捕捉内层函数的 panic 信息
+- 2025.7.10: v0.1.2
+  - 使用全局优化的 HTTP 客户端替换局部客户端实例，统一 HTTP 出口
+  - 添加自定义 robots.txt 支持
+  - 修正 Jellyfin 播放信息正则表达式，确保匹配正确的路径 [#47](https://github.com/AkimioJR/MediaWarp/issues/47)
+- 2025.10.2: v0.1.3
+  - 将 MediaServerType 从字符串类型更改为 uint8
+  - 修复 robots.txt 路由错误问题
+  - 优化初始化过程，统一日志输出，移除冗余代码
+  - 使用当前目录作为项目根目录
+- 2025.10.15: v0.1.4
+  - 添加 HTTPStrm 最终重定向缓存
+  - 添加 Alist API 缓存
+  - AlistStrm 支持基础目录未非根目录用户
+  - 移除 viper，仅支持识别 yaml 配置文件
+  - 添加结构体标签（**可能导致部分配置不通用**）
+  - 修复 AlistStrm 重定向逻辑，确保仅在有效的重定向 URL 时进行重定向
+  - 优化 QueryCaseInsensitive 中间件，简化查询参数处理逻辑
+  - 优化 LoggerFileHook 的文件处理逻辑，提高性能
+  - 修复 GZIP 压缩时响应体为空的问题 ([#64](https://github.com/AkimioJR/MediaWarp/issues/64))
+- 2025.10.27: v0.1.5
+  - 移除编码压缩/解压缩
+  - 优化中间件处理逻辑
+  - 添加图片/字幕缓存中间件
+  - 修复 Alist API 缓存问题
+- 2025.12.3: v0.1.6
+  - 更新 Jellyfin 播放路径匹配表达式支持更多服务端版本
+  - 修复 Alist API 调用问题 
+  - 重构 Alist 相关命名
+  - 提高 Alist 获取文件 URL 的性能
+- 2026.1.7: v0.1.7
+  - 修复 Emby 章节信息和缩略图显示问题 ([#79](https://github.com/AkimioJR/MediaWarp/issues/79))
+  - 修复某些播放器请求播放时多次请求非播放动作导致重定向链接获取，提高兼容性 ([#80](https://github.com/AkimioJR/MediaWarp/issues/80))
+- 2026.1.30: v0.1.8
+  - 修复新版 alist API 响应数据类型变化导致的解析错误
+  - 移除 PlaybackInfo 控制流相关代码
+  - 禁用流式播放提高兼容性
+  - 重构 PlaybackInfo 响应修改控制流程，提高兼容性
+- 2026.2.6: v0.2.0
+  - 重构 ModifyPlaybackInfo 相关方法
+  - 添加飞牛影视支持
+- 2026.2.7: v0.2.1
+  - 添加 AlistStrm 重定向 URL 耗时日志
+  - 修复 ModifyStream 响应体处理和状态码检查逻辑
+  - 更新字幕缓存正则表达式以支持下载接口
+  - 移除 FNTV 正则的大小写不敏感标志，规范变量命名
+  - 调整 HTTPStrm 和 AlistStrm 设置，优化 PlaybackInfo 处理
+  - 添加兼容模式选项以优化 HTTPStrm 请求
+- 2026.2.8: v0.2.2
+  - 飞牛影视 AlistStrm 模式支持播放网盘转码视频
+  - 修复 Emby PlaybackInfo 中 DirectStreamURL 生成错误问题
+  - 提高 Emby 的兼容性
+- 2026.3.19: v0.2.3
+  - 修复 AlistStrm 非 raw_url 模式下 url 拼接错误问题
+  - 重构 Alist 模块相关代码
+  - 更新 Go 版本和依赖版本以及使用更新的语法表达
+  - 禁止 HTTPStrm 模式下 proxy 时移除修改 SupportsDirectStream 为 false 的行为，提高兼容性
+- 2026.6.8: v0.2.4
+  - 修复基础路径不为空时 Emby/Jellyfin/Alist 客户端初始化和请求 URL 拼接异常问题
+  - 重构 Emby、Jellyfin、Alist 客户端请求地址构建逻辑，使用 url.URL/JoinPath 生成请求地址并复用全局 HTTP Client
+  - 修复示例配置中字幕转换配置键名，将 art2ass 更正为 srt2ass
+  - 优化图片缓存中间件判断逻辑和页面 HEAD 注入逻辑，减少不必要的处理和内存分配
+  - 使用嵌入文件方式处理启动 Logo，避免 Logo 字符串首尾空白
+  - 升级 Go 版本至 1.26 并更新依赖项和静态资源子模块
+  - 重构 CI、GoReleaser 和 Docker 构建流程，支持构建参数注入版本信息、新增 linux/riscv64 镜像并同步 README 到 Docker Hub
+- 2026.9.29: v0.2.5
+  - 新增飞牛影视 (FNTV) 弹幕插件支持，引入前端弹幕脚本注入与播放信息钩子
+  - 修复 VideosHandler 中 Emby 和 Jellyfin 响应缺失 Path 或 MediaSources 时的 nil 指针解引用问题
+  - 修复 ImageCache 缓存未命中时重复调用 ctx.Next() 的问题
+  - 重构页面头部脚本注入逻辑，统一管理 Emby、Jellyfin、FNTV 的嵌入处理
+  - 将反向代理已弃用的 ReverseProxy.Director 迁移至 Rewrite，并优化代理创建逻辑
+  - 优化日志格式化输出，减少字符串与内存分配
+  - 升级 Go 工具链版本至 1.26.6 并更新依赖项版本
+  - 重构 CI/CD 流程，移除 GoReleaser 改用 GitHub Actions 处理跨平台二进制与 Docker 构建，并增加代码格式、vet 与漏洞检查工作流

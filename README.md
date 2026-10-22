@@ -1,10 +1,24 @@
-# 🎬 115 网盘 + 国内 AList + 国外 Emby 全流程 STRM 302 直连与自动化刮削实战教程
+# 🎬 115 网盘 + 国内 AList + 国外 Emby 全流程 STRM 302 直连与自动化刮削完整解决方案
 
-> **架构核心亮点：**
-> - **国外 VPS 零流量中转**：通过现代 Go 中间件 **MediaWarp** 拦截播放请求，直接下发 `HTTP 302 Found` 响应，客户端直连 **115 官方高速 CDN** 满速拉流。
-> - **杜绝网盘频控封禁**：通过 **AutoFilm** 扫描网盘并在本地生成轻量 `.strm` 索引文件，Emby 仅对本地文本秒级建库，无需通过 rclone 挂载大视频文件。
-> - **海外直连媒体元数据自动化刮削**：利用国外机器网络环境，通过 **MetaTube Server + Emby 插件** 高速抓取多源影视信息、演职员及高清海报。
-> - **私密安全隧道**：国内与国外服务器使用 **Tailscale** 建立私有内网互联，无需在公网暴露 AList 端口。
+本仓库包含针对 **115 网盘 302 原画直连** 深度优化修补的 **MediaWarp** 源码、**AutoFilm (STRM 生成工具)** 源码及全套生产环境部署教程。
+
+> **核心特性：**
+> - **真正的 115 CDN 满速直连**：本项目修补了上游 MediaWarp 的 User-Agent 丢失问题，在换取播放链接时**动态透传播放器真实 UA**，彻底解决 115 官方 CDN 校验签名失败报 `403 Forbidden (invalid signature)` 的历史顽疾。
+> - **客户端无需内网组网**：开启 `raw_url: true` 后，手机 / 电视 / 电脑端播放器无需安装任何内网工具，直连 115 官方全国 CDN 高速拉流。
+> - **海外与国内服务器 0 视频带宽**：播放流量不经过任何云服务器，仅在握手瞬间消耗几十字节的 302 重定向信令。
+> - **网盘防风控刮削**：通过仓库内的 **AutoFilm** 扫描网盘并生成轻量 `.strm` 纯文本索引文件，Emby 仅对本地文本秒级建库；配合拟人化请求休眠与单线程扫描，杜绝 115 频控封号（429）。
+> - **海外高速媒体元数据刮削**：利用国外机器网络环境，结合 **MetaTube Server + Emby 插件** 毫秒级抓取多源影视信息、演职员及高清海报。
+
+---
+
+## 📁 仓库结构
+
+```text
+.
+├── MediaWarp/        # 包含动态 UA 透传优化补丁的 MediaWarp 源码与 Docker 构建文件
+├── AutoFilm/         # 网盘媒体库 STRM 文件自动生成与同步工具源码
+└── README.md         # 全流程生产环境部署与调优实战教程
+```
 
 ---
 
@@ -14,19 +28,18 @@
 [国内服务器]                                 [国外 VPS]
 ┌────────────────────────┐                   ┌──────────────────────────────────────────────┐
 │  AList / OpenList      │                   │  AutoFilm  ──生成strm──>  [本地 /data/strm]   │
-│  (挂载 115 网盘)       │                   │     │                          │ 本地秒级刮削 │
-│  外部端口: <ALIST_PORT>│                   │     ▼                          ▼              │
-│       ▲                │                   │  AList API 换链             Emby (<EMBY_PORT>)│
-│       │                │                   │  (读目录/换直链)                 ▲            │
-│  Tailscale 私网 IP     │ <── Tailscale内网 ── │  Tailscale 内网互联              │ 前置反代   │
-│  (例: 100.x.y.z)       │                   │                             MediaWarp        │
+│  (挂载 115 网盘)       │                   │  (本仓库源码集成)               │ 本地秒级刮削 │
+│  外部端口: <ALIST_PORT>│                   │     │                          ▼              │
+│       ▲                │                   │     ▼                       Emby (<EMBY_PORT>)│
+│       │                │                   │  AList API 换链                 ▲            │
+│  Tailscale 私网 IP     │ <── Tailscale内网 ── │  (读目录/换直链)                 │ 前置反代   │
+│  (例: 100.x.y.z)       │                   │                             MediaWarp (UA优化)│
 └───────┼────────────────┘                   │                             (<WARP_PORT>)    │
-        │ 获取最新直链                       └──────────────────────────────────┬───────────┘
-        │                                                                       │ 1. 播放请求
-        │                                                                       │
+        │ 带着客户端真实 UA 签出直链          └──────────────────────────────────┬───────────┘
+        │                                                                       │ 1. 播放请求 (带UA)
         ▼                                                                       │
 [115 官方高速 CDN] <──────────────── 3. 满速原画拉流播放 ───────────── [客户端 (Infuse/VidHub)]
-                                (2. 返回 302 Location 重定向)
+                                (2. 返回 302 Location 专属直链)
 ```
 
 ---
@@ -35,7 +48,7 @@
 
 > **安全提示**：建议将所有对外端口修改为你自定义的高位非标准端口，防止全网端口扫描器探测。
 
-| 节点 | 服务名称 | 容器内部固定端口 | **宿主机自定义映射端口** | 作用说明 |
+| 节点 | 服务名称 | 容器内部端口 | **宿主机自定义映射端口** | 作用说明 |
 | :--- | :--- | :--- | :--- | :--- |
 | **国内机** | `openlist` / `alist` | `5244` | **`<ALIST_PORT>`** *(自定义端口)* | 挂载 115 网盘，为国外机器提供换链 API |
 | **国外 VPS** | `emby` | `8096` | **`<EMBY_PORT>`** *(自定义端口)* | 媒体库核心后台、海报墙展示 |
@@ -62,12 +75,12 @@ docker run -d \
 
 ### 3.2 AList 后台关键配置
 1. 访问 `http://国内公网IP:<ALIST_PORT>` 进入后台（初始密码执行 `docker logs openlist` 查看）；
-2. **挂载 115**：进入【存储】->【添加】，驱动选择 **115 Open** 或 **115网盘**，**挂载路径必须填写**：`/115`；
+2. **挂载 115**：进入【存储】->【添加】，驱动选择 **115网盘**（二维码来源建议选择 `tv` 或 `android`，防盗链机制更宽松），**挂载路径必须填写**：`/115`；
 3. **获取 API 令牌**：进入【管理】->【设置】->【其他】（或【全局】），复制 **API Token**（保存备用）。
 
 ---
 
-## 🚀 4. 国外服务器部署：Emby + 刮削 + 302 直连网关
+## 🚀 4. 国外服务器部署：Emby + 刮削 + 优化版 MediaWarp
 
 ### 4.1 安装 Tailscale 并打通内网
 ```bash
@@ -128,11 +141,22 @@ docker run -d \
 
 ---
 
-### 4.3 部署 MediaWarp
+### 4.3 构建并部署优化版 MediaWarp（支持客户端 UA 透传直连）
 
-编写配置文件 `/opt/media/mediawarp/config/config.yaml`：
+本仓库内提供的 `MediaWarp/` 已经预置了 UA 动态透传补丁，解决了原生版本向 AList 换链时默认发送 `Go-http-client/1.1` 导致 115 签名不匹配的问题。
 
-```yaml
+```bash
+# 1. 克隆本仓库到国外 VPS
+git clone https://github.com/noevers/emby-115-mediawarp-autofilm.git /opt/emby-suite
+cd /opt/emby-suite/MediaWarp
+
+# 2. 构建优化版 Docker 镜像
+docker build -t mediawarp:ua-fix -f docker/Dockerfile .
+
+# 3. 编写 MediaWarp 生产配置文件
+mkdir -p /opt/media/mediawarp/config
+
+cat << EOF > /opt/media/mediawarp/config/config.yaml
 port: 9000
 
 server:
@@ -142,29 +166,39 @@ server:
 
 log:
   access:
-    console: true
+    console: false                          # 生产环境关闭访问日志刷屏
+    file: false
   service:
     console: true
     file: false
 
 cache:
   enable: true
-  alist_api_ttl: 10m
+  alist_api_ttl: 30m                        # 延长 API 缓存时间
+  image_ttl: 24h                            # 海报内存缓存 24 小时，滑动海报墙秒开
+  subtitle_ttl: 12h
 
-# 核心 115 302 直连规则
+# 核心 115 302 直连规则 (配合 UA 透传补丁，可安全开启 raw_url: true)
 alist_strm:
   enable: true
-  proxy: false                                # 严禁走国外服务器中转流量
-  raw_url: true                               # 响应 115 官方 CDN 真实直链
+  proxy: false                              # 严禁走国外服务器中转视频流量
+  raw_url: true                             # 响应 115 官方 CDN 真实直链，0 服务器带宽占用
   list:
-    - addr: http://<国内Tailscale_IP>:<ALIST_PORT> # 国内 AList 的 Tailscale 私网地址与自定义端口
-      token: "***"                # 必须带双引号
+    - addr: http://<国内Tailscale_IP>:<ALIST_PORT> # 国内 AList 的 Tailscale 私网地址与端口
+      token: "***"              # 必须带双引号
       prefix_list:
-        - /strm                               # Emby 容器内的媒体根目录
-```
+        - /strm                             # Emby 容器内的媒体根目录
 
-运行 MediaWarp 容器：
-```bash
+# 字幕高清渲染调优
+subtitle:
+  enable: true
+  srt2ass: true                             # 开启外挂 SRT 动态转高质量 ASS 描边字幕
+  ass_style:
+    - "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding"
+    - "Style: Default,苹方-简,22,&H03FFFFFF,&H00FFFFFF,&H00000000,&H02000000,-1,0,0,0,100,100,0,0,1,2,1,2,10,10,12,1"
+EOF
+
+# 4. 运行优化版 MediaWarp 容器
 docker run -d \
   --name mediawarp \
   --restart unless-stopped \
@@ -172,12 +206,12 @@ docker run -d \
   -p <WARP_PORT>:9000 \
   -v /opt/media/mediawarp/config:/config \
   -v /opt/media/mediawarp/config/config.yaml:/app/config/config.yaml \
-  akimio/mediawarp:latest
+  mediawarp:ua-fix
 ```
 
 ---
 
-### 4.4 部署 AutoFilm（带拟人防封延迟与伴生下载）
+### 4.4 部署 AutoFilm（STRM 自动生成与伴生下载）
 
 编写配置文件 `/opt/media/autofilm/config.yaml`：
 
@@ -186,7 +220,7 @@ alist:
   - id: domestic_alist
     base_url: http://<国内Tailscale_IP>:<ALIST_PORT>
     token: "***"
-    wait_time: 1.2                            # 每次请求强制休眠 1.2 秒（防网盘频控）
+    wait_time: 1.2                          # 每次请求强制休眠 1.2 秒（防网盘频控）
 
 media_servers:
   - id: foreign_emby
@@ -196,20 +230,20 @@ media_servers:
 
 alist2strm_tasks:
   - id: 115网盘
-    cron: "0 23 20 * * *"                     # 每天北京时间 20:23 执行一次
+    cron: "0 23 20 * * *"                   # 每天北京时间 20:23 执行一次
     alist: domestic_alist
-    source_dir: /115                          # AList 挂载 115 的根路径
-    target_dir: /strm/115                     # 输出到容器内目录
+    source_dir: /115                        # AList 挂载 115 的根路径
+    target_dir: /strm/115                   # 输出到容器内目录
     mode: AlistPath
     flatten_mode: false
     overwrite: false
-    concurrency: 1                            # 单线程慢速扫描，模拟正常访问
+    concurrency: 1                          # 单线程慢速扫描，模拟正常人类浏览
     # 伴生文件自动下载（字幕、封面海报、NFO 元数据直接落盘）
     download:
       enable: true
-      subtitle: true                          # 自动下载外挂字幕
-      image: true                             # 自动下载本地封面海报
-      nfo: true                               # 自动下载本地 nfo 简介
+      subtitle: true                        # 自动下载外挂字幕 (.srt/.ass)
+      image: true                           # 自动下载本地封面海报
+      nfo: true                             # 自动下载本地 nfo 简介
       concurrency: 2
     sync:
       enabled: true
@@ -294,6 +328,7 @@ chmod +x /usr/local/bin/sync-115
 ### 6.2 客户端连接
 * **服务器地址**：`http://国外VPS_IP:<WARP_PORT>`（**切记：必须填写 MediaWarp 映射的自定义端口，不可直连 Emby 的管理端口**）；
 * 填写 Emby 用户名和密码登录。
+* **无需开启 Tailscale**：得益于 UA 透传补丁，客户端可处于任意公网环境直接拉流。
 
 ### 6.3 直连验证
 播放任意 4K 原画影片，在国外 VPS 终端运行 `iftop -i any` 或 `nload`：
